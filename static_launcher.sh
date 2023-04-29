@@ -15,7 +15,7 @@ else
 fi
 
 tmpdir="$(mktemp -d)"
-projfile=$(realpath "$projfile")
+projfile=$(readlink -f "$projfile")
 
 cd "$tmpdir"
 
