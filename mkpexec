@@ -1,0 +1,270 @@
+initdir=$(pwd)
+cache_folder="$HOME/.local/share/mkpexec"
+proot_source="https://github.com/proot-me/proot/archive/refs/heads/master.zip"
+original_executable="$1"
+
+if ! [ -n "$original_executable" ]
+then
+    echo "usage: mkpexec [input file]"
+    exit
+fi
+
+echo "Checking if cache folder exists . . ."
+if [ -d $cache_folder ]
+then
+    echo "Folder exists."
+else
+    echo "Folder does not exist."
+    echo "Creating cache folder . . ."
+    if mkdir $cache_folder
+    then
+        echo "Cache folder created."
+    else
+        echo "Failed to create cache folder."
+        exit
+    fi
+fi
+
+pushd .
+cd $cache_folder
+echo "Checking if proot exists . . ."
+if [ -f proot ]
+then
+    echo "proot exists."
+else
+    echo "proot does not exist."
+    echo "Downloading proot . . ."
+    rm -r proot-src 2>/dev/null
+    wget $proot_source -O proot.zip
+    unzip proot.zip
+    rm proot.zip
+    mv *proot* proot-del
+    mv proot-del/src proot-src
+    rm -r proot-del
+    echo "proot downloaded successfully."
+    echo "Building proot . . ."
+    cd proot-src
+    cat GNUmakefile | sed -E 's/(^CC.*gcc$)/\1 -static/' > .tmp && mv .tmp GNUmakefile
+    make
+    mv proot $cache_folder
+fi
+popd
+
+echo "Verifying input file . . ."
+if [ -f $original_executable ]
+then
+    original_executable=$(readlink -f $original_executable)
+    dependencies=$(ldd "$original_executable" | grep '/' | sed -e 's/.*=>//' -e 's/(.*//' | xargs)
+    dependencies_sh=$(ldd $(readlink -f $(which sh)) | grep '/' | sed -e 's/.*=>//' -e 's/(.*//' | xargs)
+    dependencies=$(echo "$dependencies $dependencies_sh" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    dependencies="$original_executable $cache_folder/proot $(which sh) $dependencies"
+    echo "Input file verified."
+else
+    echo "Input file does not exist."
+    exit
+fi
+
+echo "Exporting dependencies . . ."
+cd $cache_folder
+rm -r deps 2>/dev/null
+mkdir deps
+cd deps
+symbols=
+echo 'void DEPENDENCIES_INIT()' >> dependencies.h
+echo '{' >> dependencies.h
+i=0
+for dep in $dependencies
+do
+    dep_realpath=$(readlink -f "$dep")
+    dep_basename=$(basename "$dep")
+    dep_outname=$(echo $dep_basename | sed 's/\./\_/g').o
+
+    echo "Exporting $dep_realpath . . ."
+    ld -r -b binary -o "$dep_outname" "$dep_realpath"
+    symbol=$(objdump -x "$dep_outname" | grep _start | sed -e 's/.* //' -e 's/_start//')
+    echo '    'DEPENDENCY_DATA[$i] = "$symbol"_start';' >> dependencies.h;
+    echo '    'DEPENDENCY_SIZE[$i] = "$symbol"_end - "$symbol"_start';' >> dependencies.h;
+    echo '    'DEPENDENCY_NAME[$i] = '"'$dep'";' >> dependencies.h;
+    symbols="$symbol $symbols"
+    i=$((i+1))
+done
+echo '}' >> dependencies.h
+for symbol in $symbols
+do
+    echo "extern char $symbol"'_start[];' | cat - "dependencies.h" > .tmp && mv .tmp "dependencies.h"
+    echo "extern char $symbol"'_end[];' | cat - "dependencies.h" > .tmp && mv .tmp "dependencies.h"
+done
+echo 'const char *DEPENDENCY_NAME[DEPENDENCIES_COUNT];' | cat - "dependencies.h" > .tmp && mv .tmp "dependencies.h"
+echo 'const char *DEPENDENCY_DATA[DEPENDENCIES_COUNT];' | cat - "dependencies.h" > .tmp && mv .tmp "dependencies.h"
+echo 'size_t DEPENDENCY_SIZE[DEPENDENCIES_COUNT];' | cat - "dependencies.h" > .tmp && mv .tmp "dependencies.h"
+echo "#define DEPENDENCIES_COUNT $i" | cat - "dependencies.h" > .tmp && mv .tmp "dependencies.h"
+
+echo "Dependencies exported."
+
+echo "Compiling . . ."
+cd $cache_folder
+
+cat > main.c << HERE
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <limits.h>
+#include <stddef.h>
+#include <dirent.h>
+#include "deps/dependencies.h"
+
+char template[] = "/tmp/mkpexec.XXXXXX";
+char *tmpdir = NULL;
+char path[PATH_MAX];
+char path_backup[PATH_MAX];
+size_t path_len;
+
+void get_tmp_path(const char* name)
+{
+	strcpy(path, tmpdir);
+    size_t len = strlen(path); 
+    if (path[len - 1] != '/')
+    {
+        path[len] = '/';
+        memcpy(path + len + 1, name, strlen(name) + 1);
+    }
+    else
+    {
+        memcpy(path + len, name, strlen(name) + 1);
+    }
+}
+void get_cwd_path(const char* name)
+{
+    getcwd(path, PATH_MAX);
+    size_t len = strlen(path);
+    if (path[len - 1] != '/')
+    {
+        path[len] = '/';
+        memcpy(path + len + 1, name, strlen(name) + 1);
+    }
+    else
+    {
+        memcpy(path + len, name, strlen(name) + 1);
+    }
+}
+
+void setup()
+{
+	tmpdir = mkdtemp(template);
+	if (tmpdir == NULL)
+	{
+		perror("mkdtemp");
+		exit(1);
+	}
+    DEPENDENCIES_INIT();
+
+    for (int i = 0; i < DEPENDENCIES_COUNT; i++)
+    {
+        char const *name = DEPENDENCY_NAME[i];
+        if (name[0] == '/') name++;
+        path_backup[0] = 0;
+        path_len = 0;
+        chdir(tmpdir);
+
+        for (size_t j = 0; j < strlen(name); j++)
+        {
+            if (name[j] == '/')
+            {
+                path_backup[path_len] = 0;
+                path_len = 0;
+                get_cwd_path(path_backup);
+                if (access(path, F_OK) != 0)
+                {
+                    mkdir(path, 0777);
+                }
+                chdir(path);
+            }
+            else
+            {
+                path_backup[path_len++] = name[j];
+            }
+        }
+        path_backup[path_len] = 0;
+        FILE *f = fopen(path_backup, "w");
+        fwrite(DEPENDENCY_DATA[i], 1, DEPENDENCY_SIZE[i], f);
+        fclose(f);
+        chmod(path_backup, S_IRUSR | S_IWUSR | S_IXUSR);
+    }
+}
+
+void cleanup_recursive()
+{
+    getcwd(path, PATH_MAX);
+    DIR *d = opendir(path);
+    struct dirent *entry;
+    struct stat fstat;
+    while ((entry = readdir(d)) != NULL)
+    {
+        char *name = malloc(strlen(entry->d_name) + 1);
+        strcpy(name, entry->d_name);
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        {
+            continue;
+        }
+        stat(name, &fstat);
+        if (S_ISDIR(fstat.st_mode))
+        {
+            chdir(name);
+            cleanup_recursive();
+            chdir("..");
+            rmdir(name);
+        }
+        else
+        {
+            unlink(name);
+        }
+        free(name);
+    }
+    closedir(d);
+}
+
+void cleanup()
+{
+    chdir(tmpdir);
+    cleanup_recursive();
+    chdir("/");
+	if (rmdir(tmpdir) == -1)
+	{
+		perror("rmdir");
+		exit(1);
+	}
+}
+
+void strappend(char *str, const char *app)
+{
+    str = realloc(str, strlen(str) + strlen(app));
+    strcat(str, app);
+}
+
+int main(int argc, char *const argv[])
+{
+    setup();
+    
+    char *command = malloc(0);
+    get_tmp_path(DEPENDENCY_NAME[1]);
+    strappend(command, path);
+    strappend(command, " -r ");
+    strappend(command, tmpdir);
+    strappend(command, " -w / ");
+    strappend(command, DEPENDENCY_NAME[0]);
+    for (int i = 1; i < argc; i++)
+    {
+        strappend(command, " ");
+        strappend(command, argv[i]);
+    }
+    int ret = system(command);
+    free(command);
+    cleanup();
+    return ret;
+}
+HERE
+gcc -static -o $initdir/$(basename "$original_executable").static main.c $(ls deps/*.o)
