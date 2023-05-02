@@ -4,7 +4,7 @@ The name of this project is short for "make portable executable," and is used to
 
 Due to the difficulty in statically linking certain libraries like X11 and ALSA, this allows you to make a portable executable that contains all of your dependencies without statically linking it.
 
-It functions similarly to Snaps or Flatpak in that it setups a sandbox that contains all your dependencies, except that the sandbox creation is carried out by the executable itself, and the executable is statically linked with no dependencies.
+It functions similarly to Snaps or Flatpak in that it sets up a sandbox that contains all your dependencies, except that the sandbox creation is carried out by the executable itself, and the executable is statically linked with no dependencies.
 
 This means that rather than expecting the user to install something like Flatpack or Snaps, you can distribute your program as a stand-alone executable. The executable will setup the sandbox on its own without any dependencies as it is statically linked, and then run your program within that sandbox.
 
