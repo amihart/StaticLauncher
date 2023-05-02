@@ -55,9 +55,7 @@ if [ -f $original_executable ]
 then
     original_executable=$(readlink -f $original_executable)
     dependencies=$(ldd "$original_executable" | grep '/' | sed -e 's/.*=>//' -e 's/(.*//' | xargs)
-    dependencies_sh=$(ldd $(readlink -f $(which sh)) | grep '/' | sed -e 's/.*=>//' -e 's/(.*//' | xargs)
-    dependencies=$(echo "$dependencies $dependencies_sh" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-    dependencies="$original_executable $cache_folder/proot $(which sh) $dependencies"
+    dependencies="$original_executable $cache_folder/proot $dependencies"
     echo "Input file verified."
 else
     echo "Input file does not exist."
@@ -78,6 +76,11 @@ do
     dep_realpath=$(readlink -f "$dep")
     dep_basename=$(basename "$dep")
     dep_outname=$(echo $dep_basename | sed 's/\./\_/g').o
+
+    if [ $i == 0 ] || [ $i == 1 ]
+    then
+        dep=/$(basename $dep)
+    fi
 
     echo "Exporting $dep_realpath . . ."
     ld -r -b binary -o "$dep_outname" "$dep_realpath"
@@ -249,7 +252,8 @@ int main(int argc, char *const argv[])
 {
     setup();
     
-    char *command = malloc(0);
+    char *command = malloc(1);
+    command[0] = 0;
     get_tmp_path(DEPENDENCY_NAME[1]);
     strappend(command, path);
     strappend(command, " -r ");
